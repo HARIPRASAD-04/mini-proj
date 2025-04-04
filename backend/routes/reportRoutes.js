@@ -5,64 +5,80 @@ const { Parser } = require('json2csv');
 const fs = require('fs');
 const path = require('path');
 
-// Helper function to build dynamic SQL query
-function buildQuery(filters) {
-    let baseQuery = 'SELECT * FROM requests WHERE 1=1';
-    const values = [];
+function buildQuery({ reg_no, type_of_work, period }) {
+  let query = 'SELECT * FROM requests WHERE 1=1';
+  const values = [];
 
-    if (filters.reg_no) {
-        baseQuery += ' AND reg_no = ?';
-        values.push(filters.reg_no);
-    }
+  if (reg_no) {
+    query += ' AND reg_no = ?';
+    values.push(reg_no);
+  }
 
-    if (filters.type_of_work) {
-        baseQuery += ' AND type_of_work = ?';
-        values.push(filters.type_of_work);
-    }
+  if (type_of_work) {
+    query += ' AND type_of_work = ?';
+    values.push(type_of_work);
+  }
 
-    if (filters.period === 'weekly') {
-        baseQuery += ' AND YEARWEEK(created_at) = YEARWEEK(NOW())';
-    } else if (filters.period === 'monthly') {
-        baseQuery += ' AND MONTH(created_at) = MONTH(NOW()) AND YEAR(created_at) = YEAR(NOW())';
-    }
+  if (period === 'weekly') {
+    query += ' AND YEARWEEK(created_at) = YEARWEEK(NOW())';
+  } else if (period === 'monthly') {
+    query += ' AND MONTH(created_at) = MONTH(NOW()) AND YEAR(created_at) = YEAR(NOW())';
+  }
 
-    return { baseQuery, values };
+  return { query, values };
 }
 
-// GET API to fetch filtered results in JSON
-// GET API to fetch all requests (no filters)
 router.get('/fetch', (req, res) => {
-    const query = 'SELECT * FROM requests ORDER BY created_at DESC';
+  const query = 'SELECT * FROM requests ORDER BY created_at DESC';
 
-    db.query(query, (err, results) => {
-        if (err) return res.status(500).json({ message: 'DB error', error: err });
-        res.json(results);
-    });
+  db.query(query, (err, results) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
+    res.json(results);
+  });
 });
 
-
-// API to download report as CSV
 router.get('/download-csv', (req, res) => {
-    const { reg_no, type_of_work, period } = req.query;
-    const { baseQuery, values } = buildQuery({ reg_no, type_of_work, period });
+  const { query, values } = buildQuery(req.query);
 
-    db.query(baseQuery, values, (err, results) => {
-        if (err) return res.status(500).json({ message: 'DB error', error: err });
+  db.query(query, values, (err, results) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
 
-        const json2csvParser = new Parser();
-        const csv = json2csvParser.parse(results);
+    if (results.length === 0) {
+      return res.status(400).json({ message: 'No data to export' });
+    }
 
-        const fileName = `report-${Date.now()}.csv`;
-        const filePath = path.join(__dirname, '../downloads', fileName);
+    try {
+      const fields = Object.keys(results[0]);
+      const parser = new Parser({ fields });
+      const csv = parser.parse(results);
 
-        fs.writeFile(filePath, csv, (err) => {
-            if (err) return res.status(500).json({ message: 'File write error' });
+      const fileName = `report-${Date.now()}.csv`;
+      const downloadDir = path.join(__dirname, '../downloads');
 
-            res.download(filePath, fileName, () => {
-                fs.unlinkSync(filePath); // Delete the file after download
-            });
+      // 💡 Ensure 'downloads' folder exists
+      if (!fs.existsSync(downloadDir)) {
+        fs.mkdirSync(downloadDir, { recursive: true });
+      }
+
+      const filePath = path.join(downloadDir, fileName);
+
+      fs.writeFile(filePath, csv, (err) => {
+        if (err) return res.status(500).json({ message: 'File write failed', error: err });
+
+        res.download(filePath, fileName, (downloadErr) => {
+          if (downloadErr) {
+            console.error('Download error:', downloadErr);
+          }
+          fs.unlink(filePath, (unlinkErr) => {
+            if (unlinkErr) console.error('Failed to delete temp file:', unlinkErr);
+          });
         });
-    });
+      });
+    } catch (err) {
+      console.error('CSV generation error:', err);
+      res.status(500).json({ message: 'CSV generation failed', error: err });
+    }
+  });
 });
 
 module.exports = router;
